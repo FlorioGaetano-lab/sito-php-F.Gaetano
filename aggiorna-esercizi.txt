@@ -1,0 +1,136 @@
+Link pagina: https://w4s.filippobilardo.it/~florio.gaetano/index.php 
+Comando da usare su locale:
+powershell -ExecutionPolicy Bypass -File "C:\aggiorna-esercizi.ps1"
+Creare documento aggiorna-esercizi.ps1,script:
+$ErrorActionPreference = "Stop"
+
+$Remote = "florio.gaetano@w4s.filippobilardo.it"
+$Port = 2222
+$TempFile = Join-Path $env:TEMP "index_dashboard.php"
+$RemoteIndex = "${Remote}:~/www/index.php"
+$RemoteTemp = "${Remote}:~/www/index.php.new"
+
+# Titoli personalizzati degli esercizi
+$Titles = @{
+    "es01a" = "Tabella pitagorica"
+    "es01b" = "Saluti in PHP"
+    "es01c" = "Triangoli con *"
+    "es02a" = "Accesso alla pagina riservata"
+    "es02b" = "Esercizio 02b"
+    "es02c" = "Esercizio 02c"
+}
+
+Write-Host "`nCerco gli esercizi sul server..." -ForegroundColor Cyan
+
+$RemoteCommand = 'cd ~/www && find . -maxdepth 2 -type f \( -name "index.php" -o -name "index.html" \)'
+
+$Listing = & ssh -p $Port $Remote $RemoteCommand
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Ricerca fallita. Nessuna modifica effettuata."
+}
+
+$Folders = @(
+    $Listing |
+    ForEach-Object { "$_".Trim() } |
+    Where-Object { $_ -match '^\./(es[^/]+)/index\.(php|html)$' } |
+    ForEach-Object { $Matches[1] } |
+    Sort-Object -Unique
+)
+
+if ($Folders.Count -eq 0) {
+    throw "Nessun esercizio trovato. Nessuna modifica effettuata."
+}
+
+Write-Host "`nEsercitazioni trovate: $($Folders.Count)" -ForegroundColor Green
+$Folders | ForEach-Object { Write-Host " - $_" }
+
+# Genera le schede
+$Colors = @("purple", "orange", "green")
+$Cards = @()
+$Index = 0
+
+foreach ($Folder in $Folders) {
+    if ($Titles.ContainsKey($Folder)) {
+        $Title = $Titles[$Folder]
+    } else {
+        $Title = "Esercizio $Folder"
+    }
+
+    $Color = $Colors[$Index % $Colors.Count]
+    $Index++
+
+    $Cards += @"
+    <a class="project-card" href="$Folder/">
+        <div class="project-icon $Color">
+            <span>&lt;/&gt;</span>
+        </div>
+        <div class="project-content">
+            <h3 class="project-title">$Title</h3>
+            <p>Apri l'esercitazione e visualizza il lavoro svolto.</p>
+        </div>
+        <span class="card-arrow" aria-hidden="true"></span>
+    </a>
+"@
+}
+
+# Scarica la pagina attuale
+& scp -P $Port $RemoteIndex $TempFile
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Download di index.php fallito. Nessuna modifica effettuata."
+}
+
+$Html = [System.IO.File]::ReadAllText($TempFile)
+
+# Verifica i marcatori prima di intervenire
+$Pattern = '(?s)<!-- EXERCISE-CARDS-START -->.*?<!-- EXERCISE-CARDS-END -->'
+$MatchesFound = [regex]::Matches($Html, $Pattern)
+
+if ($MatchesFound.Count -ne 1) {
+    throw "Servono esattamente una coppia di marcatori. Nessuna modifica effettuata."
+}
+
+$Replacement = "<!-- EXERCISE-CARDS-START -->`r`n" +
+    ($Cards -join "`r`n") +
+    "`r`n<!-- EXERCISE-CARDS-END -->"
+
+$NewHtml = [regex]::Replace(
+    $Html,
+    $Pattern,
+    [System.Text.RegularExpressions.MatchEvaluator]{
+        param($Match)
+        $Replacement
+    },
+    1
+)
+
+# Salva localmente la pagina aggiornata
+[System.IO.File]::WriteAllText(
+    $TempFile,
+    $NewHtml,
+    [System.Text.UTF8Encoding]::new($false)
+)
+
+Write-Host "`nCarico una copia temporanea..." -ForegroundColor Cyan
+
+# Carica prima un file temporaneo: la pagina attuale resta intatta
+& scp -P $Port $TempFile $RemoteTemp
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Upload temporaneo fallito. La pagina online non è stata sostituita."
+}
+
+# Backup con data e ora, poi sostituzione della pagina
+
+$FinalizeCommand = 'cd ~/www && mkdir -p php_backup && cp index.php "php_backup/index-$(date +%Y%m%d-%H%M%S).php" && mv index.php.new index.php && ls -1t php_backup/index-*.php 2>/dev/null | tail -n +4 | while IFS= read -r file; do rm -f -- "$file"; done'
+
+& ssh -p $Port $Remote $FinalizeCommand
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Aggiornamento o pulizia dei backup non riusciti. Controlla il sito."
+}
+
+Write-Host "`nAggiornamento completato!" -ForegroundColor Green
+Write-Host "Schede aggiornate: $($Folders.Count)"
+Write-Host "Apri il sito e premi Ctrl+F5."
